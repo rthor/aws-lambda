@@ -1,9 +1,11 @@
 const path = require('path')
-const aws = require('aws-sdk')
-const AwsSdkLambda = aws.Lambda
 const { mergeDeepRight, pick } = require('ramda')
 const { Component, utils } = require('@serverless/core')
 const {
+  getClients,
+  getRole,
+  createRole,
+  removeRole,
   createLambda,
   updateLambdaCode,
   updateLambdaConfig,
@@ -32,14 +34,16 @@ const outputsList = [
 ]
 
 const defaults = {
+  name: undefined,
   description: 'AWS Lambda Component',
   memory: 512,
   timeout: 10,
   code: process.cwd(),
   bucket: undefined,
+  roleArn: undefined,
   shims: [],
   handler: 'handler.hello',
-  runtime: 'nodejs10.x',
+  runtime: 'nodejs12.x',
   env: {},
   region: 'us-east-1'
 }
@@ -50,35 +54,34 @@ class AwsLambda extends Component {
 
     const config = mergeDeepRight(defaults, inputs)
 
-    config.name = this.state.name || this.context.resourceId()
+    config.name = config.name || this.state.name || this.context.resourceId()
 
     this.context.debug(
       `Starting deployment of lambda ${config.name} to the ${config.region} region.`
     )
 
-    const lambda = new AwsSdkLambda({
-      region: config.region,
-      credentials: this.context.credentials.aws
-    })
+    // Get AWS clients
+    const { lambda, iam } = getClients(this.context.credentials.aws, config.region)
 
-    const awsIamRole = await this.load('@serverless/aws-iam-role')
+    // If no AWS IAM Role role exists, auto-create a default role
+    if (!config.roleArn) {
+      console.log(
+        `No AWS IAM Role provided. Creating/Updating default IAM Role with basic execution rights.`
+      )
+      const iamRoleName = `${inputs.name}-role`
+      let res = await getRole(iam, iamRoleName)
+      if (res) {
+        config.autoRoleArn = this.state.autoRoleArn = res.Role.Arn
+      } else {
+        res = await createRole(iam, iamRoleName)
+      }
+      config.autoRoleArn = this.state.autoRoleArn = res.Role.Arn
+    }
 
-    // If no role exists, create a default role
-    let outputsAwsIamRole
-    if (!config.role) {
-      this.context.debug(`No role provided for lambda ${config.name}.`)
-
-      outputsAwsIamRole = await awsIamRole({
-        service: 'lambda.amazonaws.com',
-        policy: {
-          arn: 'arn:aws:iam::aws:policy/AdministratorAccess'
-        },
-        region: config.region
-      })
-      config.role = { arn: outputsAwsIamRole.arn }
-    } else {
-      outputsAwsIamRole = await awsIamRole(config.role)
-      config.role = { arn: outputsAwsIamRole.arn }
+    // If user has put in a custom AWS IAM Role and an auto-created role exists, delete the auto-created role
+    if (config.roleArn && this.state.autoRoleArn) {
+      console.log('Detected a new roleArn has been provided.  Removing the auto-created role...')
+      await removeRole(iam, this.state.autoRoleArn)
     }
 
     if (
@@ -181,10 +184,7 @@ class AwsLambda extends Component {
   async publishVersion() {
     const { name, region, hash } = this.state
 
-    const lambda = new AwsSdkLambda({
-      region,
-      credentials: this.context.credentials.aws
-    })
+    const { lambda } = getClients(this.context.credentials.aws, region)
 
     const { Version } = await lambda
       .publishVersion({
@@ -206,11 +206,7 @@ class AwsLambda extends Component {
 
     const { name, region } = this.state
 
-    const lambda = new AwsSdkLambda({
-      region,
-      credentials: this.context.credentials.aws
-    })
-
+    const { lambda } = getClients(this.context.credentials.aws, region)
     const awsIamRole = await this.load('@serverless/aws-iam-role')
     const layer = await this.load('@serverless/aws-lambda-layer')
 

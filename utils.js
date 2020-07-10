@@ -2,6 +2,7 @@ const { tmpdir } = require('os')
 const path = require('path')
 const archiver = require('archiver')
 const globby = require('globby')
+const AWS = require('aws-sdk')
 const { contains, isNil, last, split, equals, not, pick } = require('ramda')
 const { readFile, createReadStream, createWriteStream } = require('fs-extra')
 const { utils } = require('@serverless/core')
@@ -75,7 +76,8 @@ const createLambda = async ({
   description,
   zipPath,
   bucket,
-  role,
+  roleArn,
+  autoRoleArn,
   layer
 }) => {
   const params = {
@@ -85,7 +87,7 @@ const createLambda = async ({
     Handler: handler,
     MemorySize: memory,
     Publish: true,
-    Role: role.arn,
+    Role: roleArn || autoRoleArn,
     Runtime: runtime,
     Timeout: timeout,
     Environment: {
@@ -118,7 +120,8 @@ const updateLambdaConfig = async ({
   runtime,
   env,
   description,
-  role,
+  roleArn,
+  autoRoleArm,
   layer
 }) => {
   const functionConfigParams = {
@@ -126,7 +129,7 @@ const updateLambdaConfig = async ({
     Description: description,
     Handler: handler,
     MemorySize: memory,
-    Role: role.arn,
+    Role: roleArn || autoRoleArm,
     Runtime: runtime,
     Timeout: timeout,
     Environment: {
@@ -222,7 +225,6 @@ const getPolicy = async ({ name, region, accountId }) => {
 const configChanged = (prevLambda, lambda) => {
   const keys = ['description', 'runtime', 'role', 'handler', 'memory', 'timeout', 'env', 'hash']
   const inputs = pick(keys, lambda)
-  inputs.role = { arn: inputs.role.arn } // remove other inputs.role component outputs
   const prevInputs = pick(keys, prevLambda)
   return not(equals(inputs, prevInputs))
 }
@@ -248,7 +250,115 @@ const pack = async (code, shims = [], packDeps = true) => {
   return packDir(code, outputFilePath, shims, exclude)
 }
 
+/**
+ * Get AWS SDK Clients
+ * @param {Credentials | null | undefined} credentials
+ * @param {string} region
+ */
+const getClients = (credentials, region) => {
+  console.log(credentials, region)
+  // this error message assumes that the user is running via the CLI though...
+  if (Object.keys(credentials).length === 0) {
+    const msg = `Credentials not found. Make sure you have a .env file in the cwd. - Docs: https://git.io/JvArp`
+    throw new Error(msg)
+  }
+
+  const iam = new AWS.IAM({ credentials, region })
+  const lambda = new AWS.Lambda({ credentials, region })
+
+  return { iam, lambda }
+}
+
+/**
+ * Create an AWS IAM Role
+ * @param {IAM} iam
+ * @param {string} roleName
+ */
+const createRole = async (iam, roleName) => {
+  const assumeRolePolicyDocument = {
+    Version: '2012-10-17',
+    Statement: {
+      Effect: 'Allow',
+      Principal: {
+        Service: [
+          'lambda.amazonaws.com',
+          'edgelambda.amazonaws.com',
+        ]
+      },
+      Action: 'sts:AssumeRole'
+    }
+  }
+
+  const res = await iam
+    .createRole({
+      RoleName: roleName,
+      Path: '/',
+      AssumeRolePolicyDocument: JSON.stringify(assumeRolePolicyDocument)
+    })
+    .promise()
+
+  await iam
+    .attachRolePolicy({
+      RoleName: roleName,
+      PolicyArn: 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+    })
+    .promise()
+
+  return res
+}
+
+/**
+ * Get an AWS IAM Role
+ * @param {IAM} iam
+ * @param {string} roleName
+ */
+const getRole = async (iam, roleName) => {
+  let res
+  try {
+    res = await iam
+      .getRole({
+        RoleName: roleName
+      })
+      .promise()
+  } catch (error) {
+    if (error.code && error.code === 'NoSuchEntity') {
+      return
+    }
+    throw error
+  }
+  return res
+}
+
+/**
+ * Remove AWS IAM Role
+ * @param {IAM} iam
+ * @param {string} roleArn
+ */
+const removeRole = async (iam, roleArn) => {
+  try {
+    await iam
+      .detachRolePolicy({
+        RoleName: roleArn.split('/')[1], // extract role name from arn
+        PolicyArn: 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      })
+      .promise()
+    await iam
+      .deleteRole({
+        RoleName: roleArn.split('/')[1]
+      })
+      .promise()
+  } catch (error) {
+    if (error.code !== 'NoSuchEntity') {
+      throw error
+    }
+  }
+}
+
 module.exports = {
+  getClients,
+  createRole,
+  getRole,
+  removeRole,
   createLambda,
   updateLambdaCode,
   updateLambdaConfig,
