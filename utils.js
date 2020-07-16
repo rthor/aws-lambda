@@ -240,14 +240,26 @@ const pack = async (code, shims = [], packDeps = true) => {
     exclude = ['node_modules/**']
   }
 
-  const outputFilePath = path.join(
-    tmpdir(),
-    `${Math.random()
-      .toString(36)
-      .substring(6)}.zip`
-  )
+  const outputFilePath = path.join(tmpdir(), `${Math.random().toString(36).substring(6)}.zip`)
 
   return packDir(code, outputFilePath, shims, exclude)
+}
+
+/**
+ * Get the AWS credentials.
+ *
+ * @returns {Promise<Credentials | null | undefined>} credentials
+ */
+function getAwsCredentials() {
+  return new Promise((resolve, reject) => {
+    AWS.config.getCredentials(function (err) {
+      if (err) {
+        return reject(err)
+      }
+
+      resolve(AWS.config.credentials)
+    })
+  })
 }
 
 /**
@@ -256,7 +268,6 @@ const pack = async (code, shims = [], packDeps = true) => {
  * @param {string} region
  */
 const getClients = (credentials, region) => {
-  console.log(credentials, region)
   // this error message assumes that the user is running via the CLI though...
   if (Object.keys(credentials).length === 0) {
     const msg = `Credentials not found. Make sure you have a .env file in the cwd. - Docs: https://git.io/JvArp`
@@ -280,10 +291,7 @@ const createRole = async (iam, roleName) => {
     Statement: {
       Effect: 'Allow',
       Principal: {
-        Service: [
-          'lambda.amazonaws.com',
-          'edgelambda.amazonaws.com',
-        ]
+        Service: ['lambda.amazonaws.com', 'edgelambda.amazonaws.com']
       },
       Action: 'sts:AssumeRole'
     }
@@ -355,6 +363,7 @@ const removeRole = async (iam, roleArn) => {
 }
 
 module.exports = {
+  getAwsCredentials,
   getClients,
   createRole,
   getRole,

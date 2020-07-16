@@ -2,6 +2,7 @@ const path = require('path')
 const { mergeDeepRight, pick } = require('ramda')
 const { Component, utils } = require('@serverless/core')
 const {
+  getAwsCredentials,
   getClients,
   getRole,
   createRole,
@@ -14,7 +15,6 @@ const {
   configChanged,
   pack
 } = require('./utils')
-
 const outputsList = [
   'name',
   'hash',
@@ -61,7 +61,8 @@ class AwsLambda extends Component {
     )
 
     // Get AWS clients
-    const { lambda, iam } = getClients(this.context.credentials.aws, config.region)
+    const credentials = await getAwsCredentials()
+    const { lambda, iam } = getClients(credentials, config.region)
 
     // If no AWS IAM Role role exists, auto-create a default role
     if (!config.roleArn) {
